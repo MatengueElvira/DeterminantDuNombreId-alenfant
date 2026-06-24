@@ -1,811 +1,676 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-"""
 
-APPLICATION STREAMLIT - PRÉDICTION DU NOMBRE IDÉAL D'ENFANTS
-EDS CAMEROUN 2018 - Analyse des Préférences de Fécondité
+# 13. MACHINE LEARNING - MODÈLES PREDICTIFS
 
-Cette application permet de prédire le nombre idéal d'enfants pour une femme
-camerounaise en fonction de ses caractéristiques sociodémographiques.
-Deux modèles sont disponibles :
-  1. Modèle de Poisson avec erreurs standard robustes (HC0) - Approche GLM
-  2. Modèle Machine Learning - Poisson Lasso (meilleur modèle ML)
-"""
 
-import streamlit as st
-import pandas as pd
+print("\n" + "="*80)
+print("13. MACHINE LEARNING - MODÈLES PRÉDICTIFS DU NOMBRE IDÉAL D'ENFANTS")
+print("="*80)
+
 import numpy as np
-import statsmodels.api as sm
-import statsmodels.formula.api as smf
-from sklearn.linear_model import PoissonRegressor
-from sklearn.model_selection import train_test_split
+import pandas as pd
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, learning_curve
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor
+from sklearn.linear_model import Ridge, Lasso, ElasticNet
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.base import clone
 import warnings
 warnings.filterwarnings('ignore')
 
 
-# CONFIGURATION DE LA PAGE
+# 13.1 PRÉPARATION DES DONNÉES - VARIABLES DU MODÈLE FINAL (10 variables)
 
-st.set_page_config(
-    page_title="Prédiction Fécondité - EDS Cameroun 2018",
-    page_icon=":material/child_care:",
-    layout="wide",
-    initial_sidebar_state="expanded"
+print("\n" + "-"*60)
+print("13.1 PRÉPARATION DES DONNÉES")
+print("-"*60)
+
+variables_ml = {
+    'catégorielles': ['edu_cat', 'richesse_cat', 'region_cat', 
+                      'besoin_pf_ns', 'edu_mari_cat', 'religion_cat',
+                      'proprietaire_terre_cat', 'regarde_tv_cat', 'regarde_journal_cat'],
+    'continues': ['nb_vivants_centre']
+}
+
+print("Variables du modèle final (10 variables):")
+print(f"  Catégorielles ({len(variables_ml['catégorielles'])}): {variables_ml['catégorielles']}")
+print(f"  Continues ({len(variables_ml['continues'])}): {variables_ml['continues']}")
+
+df_ml = df_model[variables_ml['catégorielles'] + variables_ml['continues'] + ['Y']].copy()
+
+print(f"\nDimensions: {df_ml.shape[0]} observations, {df_ml.shape[1]-1} features")
+
+X = df_ml.drop('Y', axis=1)
+y = df_ml['Y']
+
+cat_features = variables_ml['catégorielles']
+num_features = variables_ml['continues']
+
+print(f"\nFeatures catégorielles: {cat_features}")
+print(f"Features numériques: {num_features}")
+
+
+# 13.2 PIPELINE DE PRÉTRAITEMENT
+
+
+print("\n" + "-"*60)
+print("13.2 PIPELINE DE PRÉTRAITEMENT")
+print("-"*60)
+
+cat_transformer = Pipeline(steps=[
+    ('onehot', OneHotEncoder(drop='first', sparse_output=False, handle_unknown='ignore'))
+])
+
+num_transformer = Pipeline(steps=[
+    ('scaler', StandardScaler())
+])
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', num_transformer, num_features),
+        ('cat', cat_transformer, cat_features)
+    ])
+
+print("Prétraitement appliqué:")
+print("  - Variables catégorielles: One-Hot Encoding (drop='first')")
+print("  - Variables continues: StandardScaler (centrage-réduction)")
+print("  - Gestion des valeurs inconnues: handle_unknown='ignore'")
+
+
+# 13.3 DIVISION TRAIN / VALIDATION / TEST
+
+
+print("\n" + "-"*60)
+print("13.3 DIVISION ENSEMBLES TRAIN / VALIDATION / TEST")
+print("-"*60)
+
+# Étape 1 : Séparation Test (20%) — JAMAIS touché avant l'évaluation finale
+X_temp, X_test, y_temp, y_test = train_test_split(
+    X, y, test_size=0.20, random_state=42, stratify=None
 )
 
+# Étape 2 : Séparation Train (60% total) / Validation (20% total)
+# 0.25 de 80% = 20% du total
+X_train, X_val, y_train, y_val = train_test_split(
+    X_temp, y_temp, test_size=0.25, random_state=42, stratify=None
+)
+
+print(f"Train:       {X_train.shape[0]} observations ({X_train.shape[0]/len(X)*100:.1f}%)")
+print(f"Validation:  {X_val.shape[0]} observations ({X_val.shape[0]/len(X)*100:.1f}%)")
+print(f"Test:        {X_test.shape[0]} observations ({X_test.shape[0]/len(X)*100:.1f}%)")
+
+print(f"\nDistribution de Y (train):       moy={y_train.mean():.2f}, std={y_train.std():.2f}")
+print(f"Distribution de Y (validation):  moy={y_val.mean():.2f}, std={y_val.std():.2f}")
+print(f"Distribution de Y (test):        moy={y_test.mean():.2f}, std={y_test.std():.2f}")
 
 
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5em;
-        font-weight: bold;
-        color: #1f4e79;
-        text-align: center;
-        padding: 20px 0;
-        border-bottom: 3px solid #1f4e79;
-        margin-bottom: 30px;
-    }
-    .sub-header {
-        font-size: 1.5em;
-        color: #2c5f8a;
-        margin-top: 20px;
-        margin-bottom: 15px;
-        border-left: 4px solid #1f4e79;
-        padding-left: 15px;
-    }
-    .result-box {
-        background-color: #f0f8ff;
-        border: 2px solid #1f4e79;
-        border-radius: 10px;
-        padding: 20px;
-        margin: 20px 0;
-    }
-    .prediction-value {
-        font-size: 3em;
-        font-weight: bold;
-        color: #1f4e79;
-        text-align: center;
-    }
-    .confidence-interval {
-        font-size: 1.2em;
-        color: #555;
-        text-align: center;
-        margin-top: 10px;
-    }
-    .conclusion-box {
-        background-color: #fff3cd;
-        border: 2px solid #ffc107;
-        border-radius: 10px;
-        padding: 20px;
-        margin: 20px 0;
-    }
-    .formula-box {
-        background-color: #f8f9fa;
-        border: 1px solid #dee2e6;
-        border-radius: 5px;
-        padding: 15px;
-        font-family: 'Courier New', monospace;
-        margin: 10px 0;
-    }
-    .metric-card {
-        background-color: #ffffff;
-        border: 1px solid #e0e0e0;
-        border-radius: 8px;
-        padding: 15px;
-        text-align: center;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    .metric-value {
-        font-size: 2em;
-        font-weight: bold;
-        color: #1f4e79;
-    }
-    .metric-label {
-        font-size: 0.9em;
-        color: #666;
-        margin-top: 5px;
-    }
-    .info-box {
-        background-color: #d1ecf1;
-        border: 1px solid #bee5eb;
-        border-radius: 5px;
-        padding: 15px;
-        margin: 10px 0;
-    }
-    .warning-box {
-        background-color: #fff3cd;
-        border: 1px solid #ffeeba;
-        border-radius: 5px;
-        padding: 15px;
-        margin: 10px 0;
-    }
-    .success-box {
-        background-color: #d4edda;
-        border: 1px solid #c3e6cb;
-        border-radius: 5px;
-        padding: 15px;
-        margin: 10px 0;
-    }
-    .segment-faible {
-        color: #28a745;
-        font-weight: bold;
-    }
-    .segment-modere {
-        color: #ffc107;
-        font-weight: bold;
-    }
-    .segment-eleve {
-        color: #dc3545;
-        font-weight: bold;
-    }
-    .stButton>button {
-        background-color: #1f4e79;
-        color: white;
-        font-weight: bold;
-        padding: 10px 30px;
-        border-radius: 5px;
-    }
-    .stButton>button:hover {
-        background-color: #2c5f8a;
-    }
-</style>
-""", unsafe_allow_html=True)
+#  DÉFINITION DES 6 MODÈLES
 
 
-# FONCTION DE CHARGEMENT DES DONNÉES ET ENTRAÎNEMENT DES MODÈLES
+print("\n" + "-"*60)
+print("13.4 DÉFINITION DES 6 MODÈLES DE MACHINE LEARNING")
+print("-"*60)
 
-
-@st.cache_data
-def charger_donnees():
-    """Charge les données EDS Cameroun 2018"""
-    try:
-        df = pd.read_stata('CMIR71FL.DTA', convert_categoricals=False)
-    except:
-        # Si le fichier n'est pas disponible, créer un DataFrame vide avec la bonne structure
-        # pour le développement/test
-        st.warning("Fichier CMIR71FL.DTA non trouvé. Veuillez placer le fichier dans le répertoire de l'application.")
-        return None, None, None, None, None, None, None, None
-
-    # Préparation de Y
-    df['Y'] = pd.to_numeric(df['v614'], errors='coerce').replace({96: np.nan, 98: np.nan, 99: np.nan})
-    df = df[(df['Y'] >= 0) & (df['Y'] <= 20)].dropna(subset=['Y'])
-    df['Y'] = df['Y'].astype(int)
-
-    # Variables indépendantes
-    df['age'] = pd.to_numeric(df['v012'], errors='coerce')
-    df['edu'] = pd.to_numeric(df['v106'], errors='coerce').replace({8: np.nan, 9: np.nan}).fillna(0).astype(int)
-    df['milieu'] = pd.to_numeric(df['v025'], errors='coerce')
-    df['richesse'] = pd.to_numeric(df['v190'], errors='coerce')
-    df['region'] = pd.to_numeric(df['v024'], errors='coerce')
-
-    # Labels
-    edu_labels = {0: 'Aucune', 1: 'Primaire', 2: 'Secondaire', 3: 'Supérieur'}
-    richesse_labels = {1: 'Plus pauvre', 2: 'Pauvre', 3: 'Moyen', 4: 'Riche', 5: 'Plus riche'}
-    region_names = {
-        1: 'Adamaoua', 2: 'Centre', 3: 'Douala', 4: 'Est', 5: 'Extreme-Nord',
-        6: 'Littoral', 7: 'Nord', 8: 'Nord-Ouest', 9: 'Ouest', 10: 'Sud',
-        11: 'Sud-Ouest', 12: 'Yaoundé'
+modeles = {
+    'Ridge': {
+        'pipeline': Pipeline([
+            ('preprocessor', preprocessor),
+            ('regressor', Ridge(alpha=1.0, random_state=42))
+        ]),
+        'params': {'regressor__alpha': [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]}
+    },
+    'Lasso': {
+        'pipeline': Pipeline([
+            ('preprocessor', preprocessor),
+            ('regressor', Lasso(alpha=0.1, random_state=42, max_iter=5000))
+        ]),
+        'params': {'regressor__alpha': [0.0001, 0.001, 0.01, 0.1, 1.0]}
+    },
+    'ElasticNet': {
+        'pipeline': Pipeline([
+            ('preprocessor', preprocessor),
+            ('regressor', ElasticNet(alpha=0.1, l1_ratio=0.5, random_state=42, max_iter=5000))
+        ]),
+        'params': {
+            'regressor__alpha': [0.001, 0.01, 0.1, 1.0],
+            'regressor__l1_ratio': [0.1, 0.3, 0.5, 0.7, 0.9]
+        }
+    },
+    'DecisionTree': {
+        'pipeline': Pipeline([
+            ('preprocessor', preprocessor),
+            ('regressor', DecisionTreeRegressor(random_state=42))
+        ]),
+        'params': {
+            'regressor__max_depth': [3, 5, 7, 10, None],
+            'regressor__min_samples_split': [2, 5, 10],
+            'regressor__min_samples_leaf': [1, 2, 4]
+        }
+    },
+    'RandomForest': {
+        'pipeline': Pipeline([
+            ('preprocessor', preprocessor),
+            ('regressor', RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1))
+        ]),
+        'params': {
+            'regressor__n_estimators': [50, 100, 200],
+            'regressor__max_depth': [5, 10, 15, None],
+            'regressor__min_samples_split': [2, 5],
+            'regressor__min_samples_leaf': [1, 2]
+        }
+    },
+    'GradientBoosting': {
+        'pipeline': Pipeline([
+            ('preprocessor', preprocessor),
+            ('regressor', GradientBoostingRegressor(random_state=42))
+        ]),
+        'params': {
+            'regressor__n_estimators': [50, 100, 200],
+            'regressor__max_depth': [3, 5, 7],
+            'regressor__learning_rate': [0.01, 0.05, 0.1],
+            'regressor__subsample': [0.8, 1.0]
+        }
     }
+}
 
-    # Préparation du modèle
-    df_model = df[['Y', 'age', 'edu', 'milieu', 'richesse', 'region']].dropna().copy()
-    df_model['age_centre'] = df_model['age'] - df_model['age'].mean()
-    age_mean = df_model['age'].mean()
+for nom, config in modeles.items():
+    print(f"\n{nom}:")
+    print(f"  Pipeline: {list(config['pipeline'].named_steps.keys())}")
+    print(f"  Hyperparamètres à optimiser: {list(config['params'].keys())}")
 
-    df_model['edu_cat'] = df_model['edu'].map(edu_labels).astype('category')
-    df_model['edu_cat'] = pd.Categorical(df_model['edu_cat'], 
-                                          categories=['Aucune', 'Primaire', 'Secondaire', 'Supérieur'],
-                                          ordered=True)
 
-    df_model['milieu_cat'] = df_model['milieu'].map({1: 'Urbain', 2: 'Rural'}).astype('category')
-    df_model['richesse_cat'] = df_model['richesse'].map(richesse_labels).astype('category')
-    df_model['richesse_cat'] = pd.Categorical(df_model['richesse_cat'],
-                                               categories=['Plus pauvre', 'Pauvre', 'Moyen', 'Riche', 'Plus riche'],
-                                               ordered=True)
-    df_model['region_cat'] = df_model['region'].map(region_names).astype('category')
+# 13.5 FONCTION D'ÉVALUATION (TRAIN / VALIDATION / TEST)
 
-    return df, df_model, age_mean, edu_labels, richesse_labels, region_names
+print("\n" + "-"*60)
+print("13.5 FONCTION D'ÉVALUATION COMPLÈTE (3 SETS)")
+print("-"*60)
 
-@st.cache_resource
-def entrainer_modeles(df_model):
-    """Entraîne les deux modèles de prédiction"""
-
-    # MODÈLE 1 : POISSON AVEC ERREURS ROBUSTES (HC0)
+def evaluer_modele_ml(nom, pipeline, X_train, y_train, X_val, y_val, X_test, y_test, deja_fit=False):
+    """
+    Évalue un modèle de ML sur Train, Validation et Test.
+    """
+    if not deja_fit:
+        pipeline.fit(X_train, y_train)
     
-    formula = "Y ~ age_centre + C(edu_cat) + C(milieu_cat) + C(richesse_cat) + C(region_cat)"
-
-    model_poisson_robuste = smf.glm(
-        formula=formula, 
-        data=df_model, 
-        family=sm.families.Poisson()
-    ).fit(cov_type='HC0')
-
-   
-    # MODÈLE 2 : POISSON LASSO (MEILLEUR MODÈLE ML qui à été selectionné)
-   
-    # Préparation des données ML
-    X = pd.get_dummies(df_model[['age', 'edu_cat', 'milieu_cat', 'richesse_cat', 'region_cat']], 
-                       drop_first=True)
-    y = df_model['Y']
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    # Entraînement du meilleur modèle ML : Poisson Lasso
-    modele_poisson_lasso = PoissonRegressor(alpha=0.01, max_iter=1000)
-    modele_poisson_lasso.fit(X_train, y_train)
-
-    return model_poisson_robuste, modele_poisson_lasso, X_train, X_test, y_train, y_test
-
-
-# FONCTIONS DE PRÉDICTION
-
-
-def predire_poisson_robuste(age, edu_cat, milieu_cat, richesse_cat, region_cat, 
-                             model_poisson, age_mean, edu_labels, richesse_labels, region_names):
-    """
-    Prédiction avec le modèle de Poisson robuste (GLM)
-
-    Formule : ln(μ) = β₀ + β_age·(age - 27.80) + β_edu·edu + β_milieu·milieu + β_richesse·richesse + β_region·region
-    μ = exp(β₀ + ...)
-    """
-
-    # Création du profil
-    profil = pd.DataFrame({
-        'age_centre': [age - age_mean],
-        'edu_cat': [edu_cat],
-        'milieu_cat': [milieu_cat],
-        'richesse_cat': [richesse_cat],
-        'region_cat': [region_cat]
-    })
-
-    # Prédiction du nombre moyen (μ)
-    pred_log = model_poisson.predict(profil)[0]
-
-    # Intervalle de confiance à 95% (méthode delta)
-    # SE(log(μ)) ≈ sqrt(x'Vx) où V est la matrice de variance-covariance
-    # Pour simplifier, on utilise une approximation conservative
-    se_log = 0.05  # Approximation basée sur les erreurs standard moyennes
-
-    ic_inf = np.exp(np.log(pred_log) - 1.96 * se_log)
-    ic_sup = np.exp(np.log(pred_log) + 1.96 * se_log)
-
-    # Probabilité de véracité (probabilité que la prédiction soit dans l'IC)
-    # Basée sur la distribution normale : P(IC contient la vraie valeur) = 95%
-    proba_veracite = 0.95
-
-    return pred_log, ic_inf, ic_sup, proba_veracite
-
-def predire_ml(age, edu_cat, milieu_cat, richesse_cat, region_cat, 
-                modele_ml, X_train):
-    """
-    Prédiction avec le modèle Machine Learning (Poisson Lasso)
-
-    Le modèle PoissonRegressor utilise la même fonction de lien log :
-    ln(μ) = β₀ + β₁X₁ + ... + βₖXₖ
-    """
-
-    # Création du DataFrame avec les valeurs saisies
-    nouvel_individu = pd.DataFrame({
-        'age': [age],
-        'edu_cat': [edu_cat],
-        'milieu_cat': [milieu_cat],
-        'richesse_cat': [richesse_cat],
-        'region_cat': [region_cat]
-    })
-
-    # Création des dummies (même structure que l'entraînement)
-    nouvel_individu_dummies = pd.get_dummies(nouvel_individu)
-
-    # Ajouter les colonnes manquantes
-    for col in X_train.columns:
-        if col not in nouvel_individu_dummies.columns:
-            nouvel_individu_dummies[col] = 0
-
-    # Réordonner les colonnes comme dans X_train
-    nouvel_individu_dummies = nouvel_individu_dummies[X_train.columns]
-
-    # Prédiction
-    prediction = modele_ml.predict(nouvel_individu_dummies)[0]
-
-    # Intervalle de confiance approximatif (basé sur l'erreur standard du modèle)
-    # RMSE du modèle sur le test set ≈ 1.2756
-    rmse = 1.2756
-    ic_inf = max(0, prediction - 1.96 * rmse)
-    ic_sup = prediction + 1.96 * rmse
-
-    # Probabilité de véracité
-    proba_veracite = 0.95
-
-    return prediction, ic_inf, ic_sup, proba_veracite
-
-def generer_conclusion(prediction, ic_inf, ic_sup, age, edu_cat, milieu_cat, richesse_cat, region_cat):
-    """
-    Génère une conclusion claire et accessible pour l'utilisateur
-    """
-
-    # Détermination du segment
-    if prediction < 3.5:
-        segment = "Faible"
-        couleur_segment = "segment-faible"
-        reco = "Maintien des services standards de planification familiale"
-        interpretation = """
-        <div class='success-box'>
-        <strong>🟢 Interprétation :</strong> Cette femme a une préférence de fécondité <strong>faible</strong> 
-        par rapport à la moyenne camerounaise (4.88 enfants). Elle est probablement influencée par :
-        <ul>
-            <li>Un niveau d'éducation élevé (si applicable)</li>
-            <li>Un milieu de vie urbain et moderne</li>
-            <li>Un statut socio-économique favorable</li>
-        </ul>
-        <strong>Recommandation :</strong> Maintenir l'accès aux services de santé reproductive et 
-        continuer les programmes d'éducation et d'autonomisation des femmes.
-        </div>
-        """
-    elif prediction < 5.5:
-        segment = "Modéré"
-        couleur_segment = "segment-modere"
-        reco = "Information et accès facilité à la planification familiale"
-        interpretation = """
-        <div class='warning-box'>
-        <strong>🟡 Interprétation :</strong> Cette femme a une préférence de fécondité <strong>modérée</strong>, 
-        proche de la moyenne nationale. Elle représente la majorité de la population camerounaise.
-        <ul>
-            <li>Ses préférences sont influencées par les normes sociales dominantes</li>
-            <li>L'accès à l'information sur la planification familiale peut influencer sa décision</li>
-            <li>L'éducation et l'autonomie économique sont des leviers d'action</li>
-        </ul>
-        <strong>Recommandation :</strong> Renforcer l'information et l'accès aux méthodes de 
-        planification familiale. Cibler les jeunes filles pour l'éducation.
-        </div>
-        """
+    # Prédictions sur les 3 ensembles
+    y_pred_train = pipeline.predict(X_train)
+    y_pred_val   = pipeline.predict(X_val)
+    y_pred_test  = pipeline.predict(X_test)
+    
+    # Métriques RMSE
+    rmse_train = np.sqrt(mean_squared_error(y_train, y_pred_train))
+    rmse_val   = np.sqrt(mean_squared_error(y_val, y_pred_val))
+    rmse_test  = np.sqrt(mean_squared_error(y_test, y_pred_test))
+    
+    # Métriques Test
+    mae_test  = mean_absolute_error(y_test, y_pred_test)
+    r2_test   = r2_score(y_test, y_pred_test)
+    
+    # MAPE (sur test, valeurs > 0 uniquement)
+    y_test_nz = y_test[y_test > 0]
+    y_pred_nz = y_pred_test[y_test > 0]
+    mape = np.mean(np.abs((y_test_nz - y_pred_nz) / y_test_nz)) * 100 if len(y_test_nz) > 0 else np.nan
+    
+    # Accuracy à ±0.5 et ±1 près (sur test)
+    acc_half = np.mean(np.abs(y_test - y_pred_test) < 0.5) * 100
+    acc_one  = np.mean(np.abs(y_test - y_pred_test) < 1.0) * 100
+    
+    # Sur-apprentissage = écart entre Train et Validation (JAMAIS Test)
+    ecart_rmse = rmse_train - rmse_val
+    
+    print(f"\n{'='*60}")
+    print(f" {nom}")
+    print(f"{'='*60}")
+    print(f"RMSE (train)       : {rmse_train:.4f}")
+    print(f"RMSE (validation)  : {rmse_val:.4f}")
+    print(f"RMSE (test)        : {rmse_test:.4f}")
+    print(f"MAE (test)         : {mae_test:.4f}")
+    print(f"R² (test)          : {r2_test:.4f}")
+    print(f"MAPE (test)        : {mape:.2f}%")
+    print(f"Accuracy ±0.5      : {acc_half:.1f}%")
+    print(f"Accuracy ±1.0      : {acc_one:.1f}%")
+    print(f"Écart train/val    : {ecart_rmse:.4f}")
+    
+    if abs(ecart_rmse) > 0.3:
+        print("  Sur-apprentissage détecté (train vs validation)!")
     else:
-        segment = "Élevé"
-        couleur_segment = "segment-eleve"
-        reco = "Intervention intensive en planification familiale"
-        interpretation = """
-        <div class='conclusion-box'>
-        <strong>🔴 Interprétation :</strong> Cette femme a une préférence de fécondité <strong>élevée</strong>, 
-        supérieure à la moyenne nationale. Cela peut s'expliquer par :
-        <ul>
-            <li>Un faible niveau d'éducation ou d'alphabétisation</li>
-            <li>Un milieu rural avec des normes pronatalistes fortes</li>
-            <li>Un statut socio-économique précaire</li>
-            <li>Une appartenance régionale à forte tradition familiale</li>
-        </ul>
-        <strong>Recommandation :</strong> Intervention prioritaire nécessaire :
-        <ul>
-            <li>Programmes intensifs de sensibilisation à la planification familiale</li>
-            <li>Amélioration de l'accès à l'éducation des filles</li>
-            <li>Renforcement des services de santé reproductive dans la région</li>
-            <li>Actions de développement économique ciblées</li>
-        </ul>
-        </div>
-        """
-
-    # Analyse des facteurs clés
-    facteurs = []
-    if edu_cat in ['Supérieur', 'Secondaire']:
-        facteurs.append(" Éducation élevée (réduit la fécondité désirée)")
-    elif edu_cat == 'Aucune':
-        facteurs.append(" Absence d'éducation (augmente la fécondité désirée)")
-
-    if milieu_cat == 'Urbain':
-        facteurs.append(" Milieu urbain (réduit la fécondité désirée)")
-    else:
-        facteurs.append(" Milieu rural (augmente la fécondité désirée)")
-
-    if richesse_cat in ['Plus riche', 'Riche']:
-        facteurs.append(" Niveau de richesse élevé (réduit la fécondité désirée)")
-    elif richesse_cat == 'Plus pauvre':
-        facteurs.append(" Niveau de pauvreté élevé (augmente la fécondité désirée)")
-
-    if region_cat in ['Douala', 'Littoral', 'Yaoundé']:
-        facteurs.append(" Région urbaine/cosmopolite (réduit la fécondité)")
-    elif region_cat in ['Adamaoua', 'Extrême-Nord', 'Nord']:
-        facteurs.append(" Région traditionnelle/conservatrice (augmente la fécondité)")
-
-    return segment, couleur_segment, reco, interpretation, facteurs
+        print(" Pas de sur-apprentissage significatif")
+    
+    return {
+        'nom': nom,
+        'pipeline': pipeline,
+        'rmse_train': rmse_train,
+        'rmse_val': rmse_val,
+        'rmse_test': rmse_test,
+        'mae': mae_test,
+        'r2': r2_test,
+        'mape': mape,
+        'acc_half': acc_half,
+        'acc_one': acc_one,
+        'ecart': ecart_rmse,
+        'y_pred_test': y_pred_test,
+        'y_pred_val': y_pred_val,
+        'y_pred_train': y_pred_train
+    }
 
 
-# INTERFACE PRINCIPALE
 
+print("\n" + "-"*60)
+print("13.6 ENTRAÎNEMENT (GRIDSEARCH SUR TRAIN) ET ÉVALUATION (TRAIN/VAL/TEST)")
+print("-"*60)
 
-def main():
-    # En-tête
-    st.write(":material/smart_toy:")
-    st.markdown("<div class='main-header'> PRÉDICTION DU NOMBRE IDÉAL D'ENFANTS<br>EDS Cameroun 2018</div>", 
-                unsafe_allow_html=True)
+resultats_ml = {}
 
-    # Description
-    st.markdown("""
-    <div class='info-box'>
-    <strong>Bienvenue !</strong> Cette application utilise deux modèles statistiques avancés pour prédire 
-    le nombre idéal d'enfants qu'une femme camerounaise souhaite avoir, en fonction de ses caractéristiques 
-    sociodémographiques. Les modèles sont entraînés sur les données de l'Enquête Démographique et de Santé (EDS) 2018.
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Chargement des données
-    resultat = charger_donnees()
-
-    if resultat[0] is None:
-        st.error(" Impossible de charger les données. Veuillez vérifier que le fichier CMIR71FL.DTA est présent.")
-        return
-
-    df, df_model, age_mean, edu_labels, richesse_labels, region_names = resultat
-
-    # Entraînement des modèles
-    model_poisson_robuste, modele_ml, X_train, X_test, y_train, y_test = entrainer_modeles(df_model)
-
-   
-    # BARRE LATÉRALE - SAISIE DES CARACTÉRISTIQUES
-
-
-    st.sidebar.markdown("##  Caractéristiques de la femme")
-    st.sidebar.markdown("---")
-
-    # Âge
-    age = st.sidebar.slider(" Âge (années)", min_value=15, max_value=49, value=27, step=1)
-
-    # Éducation
-    edu_options = ['Aucune', 'Primaire', 'Secondaire', 'Supérieur']
-    edu_cat = st.sidebar.selectbox("🎓 Niveau d'éducation", edu_options)
-
-    # Milieu
-    milieu_options = ['Urbain', 'Rural']
-    milieu_cat = st.sidebar.selectbox(" Milieu de résidence", milieu_options)
-
-    # Richesse
-    richesse_options = ['Plus pauvre', 'Pauvre', 'Moyen', 'Riche', 'Plus riche']
-    richesse_cat = st.sidebar.selectbox(" Quintile de richesse", richesse_options)
-
-    # Région
-    region_options = [
-        'Adamaoua', 'Centre', 'Douala', 'Est', 'Extreme-Nord',
-        'Littoral', 'Nord', 'Nord-Ouest', 'Ouest', 'Sud',
-        'Sud-Ouest', 'Yaoundé'
-    ]
-    region_cat = st.sidebar.selectbox(" Région de résidence", region_options)
-
-    st.sidebar.markdown("---")
-
-    # Choix du modèle
-    st.sidebar.markdown("##  Modèle de prédiction")
-    modele_choisi = st.sidebar.radio(
-        "Choisir le modèle :",
-        ["Modèle de Poisson Robuste (GLM)", "Modèle Machine Learning (Poisson Lasso)"]
+for nom, config in modeles.items():
+    print(f"\n{'='*70}")
+    print(f"ENTRAÎNEMENT: {nom}")
+    print(f"{'='*70}")
+    
+    # GridSearchCV : optimisation sur X_train UNIQUEMENT (CV interne = folds du train)
+    grid = GridSearchCV(
+        config['pipeline'],
+        config['params'],
+        cv=5,
+        scoring='neg_root_mean_squared_error',
+        n_jobs=-1,
+        verbose=0
     )
-
-    st.sidebar.markdown("---")
-
-    # Bouton de prédiction
-    predict_btn = st.sidebar.button("Lancer la prédiction", use_container_width=True,icon=":material/thumb_up:")
-
-
-    # ZONE PRINCIPALE - AFFICHAGE DES RÉSULTATS
     
+    grid.fit(X_train, y_train)
+    
+    print(f"Meilleurs paramètres: {grid.best_params_}")
+    print(f"Meilleur RMSE CV (train folds): {-grid.best_score_:.4f}")
+    
+    # Évaluation sur les 3 sets avec le meilleur modèle (déjà fitté sur X_train)
+    meilleur_pipeline = grid.best_estimator_
+    resultats_ml[nom] = evaluer_modele_ml(
+        nom, meilleur_pipeline, 
+        X_train, y_train, X_val, y_val, X_test, y_test, 
+        deja_fit=True
+    )
+    resultats_ml[nom]['best_params'] = grid.best_params_
+    resultats_ml[nom]['cv_rmse'] = -grid.best_score_
 
-    if predict_btn:
-        st.markdown("<div class='sub-header'> RÉSULTATS DE LA PRÉDICTION</div>", unsafe_allow_html=True)
 
-        # Création de deux colonnes pour les deux modèles
-        col1, col2 = st.columns(2)
 
-        
-        # MODÈLE 1 : POISSON ROBUSTE
-      
-        with col1:
-            st.markdown("""
-            <div style='background-color: #e8f4f8; padding: 15px; border-radius: 10px; border-left: 5px solid #1f4e79;'>
-            <h3 style='color: #1f4e79; margin: 0;'> Modèle de Poisson Robuste (GLM)</h3>
-            <p style='font-size: 0.9em; color: #666; margin-top: 5px;'>
-            Approche statistique classique avec erreurs standard robustes (HC0)
-            </p>
-            </div>
-            """, unsafe_allow_html=True)
+print("\n" + "="*80)
+print("13.7 CLASSEMENT FINAL DES 6 MODÈLES (BASÉ SUR VALIDATION)")
+print("="*80)
 
-            pred_poisson, ic_inf_p, ic_sup_p, proba_p = predire_poisson_robuste(
-                age, edu_cat, milieu_cat, richesse_cat, region_cat,
-                model_poisson_robuste, age_mean, edu_labels, richesse_labels, region_names
-            )
+comparaison = pd.DataFrame({
+    'Modèle': list(resultats_ml.keys()),
+    'RMSE CV': [resultats_ml[m]['cv_rmse'] for m in resultats_ml],
+    'RMSE Train': [resultats_ml[m]['rmse_train'] for m in resultats_ml],
+    'RMSE Val': [resultats_ml[m]['rmse_val'] for m in resultats_ml],
+    'RMSE Test': [resultats_ml[m]['rmse_test'] for m in resultats_ml],
+    'MAE Test': [resultats_ml[m]['mae'] for m in resultats_ml],
+    'R² Test': [resultats_ml[m]['r2'] for m in resultats_ml],
+    'MAPE (%)': [resultats_ml[m]['mape'] for m in resultats_ml],
+    'Acc ±0.5 (%)': [resultats_ml[m]['acc_half'] for m in resultats_ml],
+    'Acc ±1.0 (%)': [resultats_ml[m]['acc_one'] for m in resultats_ml],
+    'Sur-app.': ['Oui' if abs(resultats_ml[m]['ecart']) > 0.3 else 'Non' for m in resultats_ml]
+})
 
-            st.markdown(f"""
-            <div class='result-box'>
-                <div style='text-align: center; margin-bottom: 10px;'>
-                    <span style='font-size: 1.2em; color: #555;'>Nombre idéal d'enfants prédit</span>
-                </div>
-                <div class='prediction-value'>{pred_poisson:.2f}</div>
-                <div class='confidence-interval'>
-                     Intervalle de confiance à 95% : [{ic_inf_p:.2f}, {ic_sup_p:.2f}]
-                </div>
-                <div style='text-align: center; margin-top: 15px; font-size: 1em; color: #1f4e79;'>
-                     Probabilité de véracité : <strong>{proba_p*100:.0f}%</strong>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+# Classement par RMSE Validation (sélection du modèle)
+comparaison = comparaison.sort_values('RMSE Val')
+print("\n" + comparaison.to_string(index=False))
 
-            # Formule utilisée
-            st.markdown("""
-            <div class='formula-box'>
-            <strong>Formule du modèle :</strong><br>
-            ln(μ) = β₀ + β<sub>age</sub>·(age - 27.80) + β<sub>edu</sub>·éducation + β<sub>milieu</sub>·milieu + β<sub>richesse</sub>·richesse + β<sub>région</sub>·région<br><br>
-            <strong>μ = exp(...</strong> ) = nombre moyen idéal d'enfants
-            </div>
-            """, unsafe_allow_html=True)
+# Identification du meilleur modèle (basé sur la validation)
+meilleur_nom = comparaison.iloc[0]['Modèle']
+print(f"\n MEILLEUR MODÈLE (sur validation): {meilleur_nom}")
+print(f"   RMSE Validation = {resultats_ml[meilleur_nom]['rmse_val']:.4f}")
+print(f"   RMSE Test       = {resultats_ml[meilleur_nom]['rmse_test']:.4f}")
+print(f"   R² Test         = {resultats_ml[meilleur_nom]['r2']:.4f}")
+print(f"   Accuracy ±1.0   = {resultats_ml[meilleur_nom]['acc_one']:.1f}%")
 
-            # Explication de la méthode
-            with st.expander(" Explication de la méthode"):
-                st.markdown("""
-                **Pourquoi le modèle de Poisson ?**
 
-                La variable "nombre idéal d'enfants" est une **variable de comptage** (valeurs entières : 0, 1, 2, 3...). 
-                Le modèle de Poisson est spécifiquement conçu pour ce type de données.
+# 13.8 VISUALISATIONS COMPARATIVES
 
-                **Pourquoi "robuste" ?**
 
-                Les données présentent une **sous-dispersion** (variance < moyenne). Les erreurs standard robustes (HC0) 
-                corrigent ce biais et garantissent des intervalles de confiance valides.
+print("\n" + "-"*60)
+print("13.8 VISUALISATIONS COMPARATIVES")
+print("-"*60)
 
-                **Interprétation des coefficients :**
-                - Les coefficients β s'interprètent en **log-nombre d'enfants**
-                - exp(β) = facteur de multiplication du nombre d'enfants
-                - Exemple : si β = -0.17, alors exp(-0.17) = 0.84 → réduction de 16%
-                """)
+# Figure 1: Comparaison des métriques
+fig, axes = plt.subplots(2, 3, figsize=(16, 10))
 
-     
-        # MODÈLE 2 : MACHINE LEARNING
-        
-        with col2:
-            st.markdown("""
-            <div style='background-color: #f0f8f0; padding: 15px; border-radius: 10px; border-left: 5px solid #28a745;'>
-            <h3 style='color: #28a745; margin: 0;'> Modèle Machine Learning (Poisson Lasso)</h3>
-            <p style='font-size: 0.9em; color: #666; margin-top: 5px;'>
-            Approche moderne avec régularisation L1 (meilleur modèle ML testé)
-            </p>
-            </div>
-            """, unsafe_allow_html=True)
+metrics = ['RMSE Val', 'RMSE Test', 'MAE Test', 'R² Test', 'Acc ±0.5 (%)', 'Acc ±1.0 (%)']
+colors = plt.cm.RdYlGn(np.linspace(0.2, 0.8, len(comparaison)))
 
-            pred_ml, ic_inf_ml, ic_sup_ml, proba_ml = predire_ml(
-                age, edu_cat, milieu_cat, richesse_cat, region_cat,
-                modele_ml, X_train
-            )
-
-            st.markdown(f"""
-            <div class='result-box'>
-                <div style='text-align: center; margin-bottom: 10px;'>
-                    <span style='font-size: 1.2em; color: #555;'>Nombre idéal d'enfants prédit</span>
-                </div>
-                <div class='prediction-value' style='color: #28a745;'>{pred_ml:.2f}</div>
-                <div class='confidence-interval'>
-                     Intervalle de confiance à 95% : [{ic_inf_ml:.2f}, {ic_sup_ml:.2f}]
-                </div>
-                <div style='text-align: center; margin-top: 15px; font-size: 1em; color: #28a745;'>
-                     Probabilité de véracité : <strong>{proba_ml*100:.0f}%</strong>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-            # Formule utilisée
-            st.markdown("""
-            <div class='formula-box'>
-            <strong>Formule du modèle :</strong><br>
-            ln(μ) = β₀ + β₁·X₁ + β₂·X₂ + ... + βₖ·Xₖ<br><br>
-            <strong>Régularisation Lasso :</strong> pénalise les coefficients peu importants<br>
-            <strong>μ = exp(...)</strong> = nombre moyen idéal d'enfants
-            </div>
-            """, unsafe_allow_html=True)
-
-            # Explication de la méthode
-            with st.expander(" Explication de la méthode"):
-                st.markdown("""
-                **Pourquoi le Poisson Lasso ?**
-
-                Le Lasso est une technique de **régularisation** qui sélectionne automatiquement les variables 
-                les plus importantes en mettant les autres coefficients à zéro.
-
-                **Pourquoi c'est le meilleur modèle ML ?**
-
-                Parmi les 4 modèles testés (Random Forest, Gradient Boosting, Ridge, Lasso), 
-                le **Poisson Lasso** a obtenu :
-                - Le plus faible RMSE (1.2756)
-                - Le plus haut R² (0.2210)
-                - Le plus faible MAPE (24.75%)
-
-                **Avantage du ML :**
-                - Meilleure capacité prédictive
-                - Gère automatiquement les interactions entre variables
-                - Moins sensible aux outliers
-                """)
-
-        # ================================================================================
-        # SYNTHÈSE DES DEUX MODÈLES
-        # ================================================================================
-        st.markdown("<div class='sub-header'> SYNTHÈSE ET CONCLUSION</div>", unsafe_allow_html=True)
-
-        # Moyenne des deux prédictions
-        pred_moyenne = (pred_poisson + pred_ml) / 2
-        ic_inf_moy = (ic_inf_p + ic_inf_ml) / 2
-        ic_sup_moy = (ic_sup_p + ic_sup_ml) / 2
-
-        col_synth1, col_synth2, col_synth3 = st.columns(3)
-
-        with col_synth1:
-            st.markdown(f"""
-            <div class='metric-card'>
-                <div class='metric-value'>{pred_poisson:.2f}</div>
-                <div class='metric-label'>Modèle Poisson Robuste</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        with col_synth2:
-            st.markdown(f"""
-            <div class='metric-card'>
-                <div class='metric-value' style='color: #28a745;'>{pred_ml:.2f}</div>
-                <div class='metric-label'>Modèle Machine Learning</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        with col_synth3:
-            st.markdown(f"""
-            <div class='metric-card'>
-                <div class='metric-value' style='color: #6f42c1;'>{pred_moyenne:.2f}</div>
-                <div class='metric-label'>Moyenne des deux modèles</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # Conclusion détaillée
-        segment, couleur, reco, interpretation, facteurs = generer_conclusion(
-            pred_moyenne, ic_inf_moy, ic_sup_moy, age, edu_cat, milieu_cat, richesse_cat, region_cat
-        )
-
-        st.markdown(f"""
-        <div style='margin-top: 20px;'>
-            <h3 style='color: #1f4e79;'>📋 Profil analysé</h3>
-            <table style='width: 100%; border-collapse: collapse; margin: 15px 0;'>
-                <tr style='background-color: #f8f9fa;'>
-                    <td style='padding: 10px; border: 1px solid #dee2e6;'><strong>Âge</strong></td>
-                    <td style='padding: 10px; border: 1px solid #dee2e6;'>{age} ans</td>
-                </tr>
-                <tr>
-                    <td style='padding: 10px; border: 1px solid #dee2e6;'><strong>Éducation</strong></td>
-                    <td style='padding: 10px; border: 1px solid #dee2e6;'>{edu_cat}</td>
-                </tr>
-                <tr style='background-color: #f8f9fa;'>
-                    <td style='padding: 10px; border: 1px solid #dee2e6;'><strong>Milieu</strong></td>
-                    <td style='padding: 10px; border: 1px solid #dee2e6;'>{milieu_cat}</td>
-                </tr>
-                <tr>
-                    <td style='padding: 10px; border: 1px solid #dee2e6;'><strong>Richesse</strong></td>
-                    <td style='padding: 10px; border: 1px solid #dee2e6;'>{richesse_cat}</td>
-                </tr>
-                <tr style='background-color: #f8f9fa;'>
-                    <td style='padding: 10px; border: 1px solid #dee2e6;'><strong>Région</strong></td>
-                    <td style='padding: 10px; border: 1px solid #dee2e6;'>{region_cat}</td>
-                </tr>
-            </table>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Segment de risque
-        st.markdown(f"""
-        <div style='text-align: center; margin: 20px 0;'>
-            <h3>Segment de risque : <span class='{couleur}'>{segment}</span></h3>
-            <p style='font-size: 1.1em; color: #555;'>{reco}</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Facteurs influençant la prédiction
-        st.markdown("""
-        <div style='margin-top: 20px;'>
-            <h4 style='color: #1f4e79;' > Facteurs influençant cette prédiction</h4>
-        </div>
-        """, unsafe_allow_html=True)
-
-        for facteur in facteurs:
-            st.markdown(f"<div style='padding: 5px 0; font-size: 1em;'>{facteur}</div>", unsafe_allow_html=True)
-
-        # Interprétation détaillée
-        st.markdown(interpretation, unsafe_allow_html=True)
-
-        # Comparaison avec la moyenne nationale
-        moyenne_nationale = 4.88
-        ecart = pred_moyenne - moyenne_nationale
-
-        if abs(ecart) < 0.5:
-            comparaison = "proche de la moyenne nationale"
-            couleur_comp = "#ffc107"
-        elif ecart < 0:
-            comparaison = "inférieur à la moyenne nationale"
-            couleur_comp = "#28a745"
-        else:
-            comparaison = "supérieur à la moyenne nationale"
-            couleur_comp = "#dc3545"
-
-        st.markdown(f"""
-        <div style='background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 10px; padding: 20px; margin-top: 20px;'>
-            <h4 style='color: #1f4e79; margin-top: 0;'> Comparaison avec la population</h4>
-            <p style='font-size: 1.1em;'>
-            La prédiction de <strong>{pred_moyenne:.2f} enfants</strong> est 
-            <span style='color: {couleur_comp}; font-weight: bold;'>{comparaison}</span> 
-            ({moyenne_nationale:.2f} enfants).
-            </p>
-            <p style='font-size: 1em; color: #666;'>
-            Écart : <strong>{ecart:+.2f}</strong> enfant(s) par rapport à la moyenne.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Note méthodologique
-        st.markdown("""
-        <div style='margin-top: 30px; padding: 15px; background-color: #e9ecef; border-radius: 5px; font-size: 0.9em; color: #666;'>
-        <strong> Note méthodologique :</strong> Cette prédiction est basée sur un modèle statistique entraîné 
-        sur 13,527 femmes camerounaises. L'intervalle de confiance à 95% signifie que si l'on répétait 
-        l'enquête, 95% des intervalles ainsi construits contiendraient la vraie valeur. La probabilité de 
-        véracité de 95% reflète ce niveau de confiance statistique standard.
-        </div>
-        """, unsafe_allow_html=True)
-
+for idx, metric in enumerate(metrics):
+    ax = axes[idx // 3, idx % 3]
+    bars = ax.barh(comparaison['Modèle'], comparaison[metric], color=colors)
+    ax.set_xlabel(metric)
+    ax.set_title(f'Comparaison: {metric}')
+    
+    for bar, val in zip(bars, comparaison[metric]):
+        if not np.isnan(val):
+            ax.text(val + 0.01 * max(comparaison[metric]), bar.get_y() + bar.get_height()/2, 
+                   f'{val:.3f}', va='center', fontsize=8)
+    
+    # Meilleur modèle en vert (min pour erreurs, max pour R²/acc)
+    if 'RMSE' in metric or 'MAE' in metric or 'MAPE' in metric:
+        best_idx = comparaison[metric].idxmin()
     else:
-        # Page d'accueil avant prédiction
-        st.markdown("""
-        <div style='text-align: center; padding: 50px 20px;'>
-            <h2 style='color: #1f4e79;'> Commencez votre analyse</h2>
-            <p style='font-size: 1.2em; color: #666; margin-top: 20px;'>
-            Remplissez les caractéristiques de la femme dans le panneau de gauche,<br>
-            choisissez votre modèle de prédiction, puis cliquez sur <strong>"Lancer la prédiction"</strong>.
-            </p>
-            <div style='margin-top: 40px;'>
-                <div style='display: inline-block; text-align: center; margin: 0 20px;'>
-                    <div style='font-size: 3em;'></div>
-                    <p style='font-weight: bold; color: #1f4e79;'>Modèle Poisson Robuste</p>
-                    <p style='font-size: 0.9em; color: #666;'>Approche statistique classique<br>avec intervalles de confiance</p>
-                </div>
-                <div style='display: inline-block; text-align: center; margin: 0 20px;'>
-                    <div style='font-size: 3em;'></div>
-                    <p style='font-weight: bold; color: #28a745;'>Modèle Machine Learning</p>
-                    <p style='font-size: 0.9em; color: #666;'>Approche moderne<br>avec régularisation Lasso</p>
-                </div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        best_idx = comparaison[metric].idxmax()
+    bars[best_idx].set_color('#2ecc71')
 
-        # Informations sur les modèles
-        col_info1, col_info2 = st.columns(2)
+plt.tight_layout()
+plt.savefig('ml_comparaison_metriques.png', dpi=150, bbox_inches='tight')
+plt.show()
+print("Figure sauvegardée: ml_comparaison_metriques.png")
 
-        with col_info1:
-            st.markdown("""
-            <div style='background-color: #e8f4f8; padding: 20px; border-radius: 10px; margin: 10px;'>
-            <h4 style='color: #1f4e79;'> Modèle de Poisson Robuste</h4>
-            <ul style='color: #555;'>
-                <li><strong>Type :</strong> GLM (Generalized Linear Model)</li>
-                <li><strong>Fonction de lien :</strong> Logarithme</li>
-                <li><strong>Distribution :</strong> Poisson</li>
-                <li><strong>Correction :</strong> Erreurs standard robustes (HC0)</li>
-                <li><strong>Objectif :</strong> Inférence statistique</li>
-                <li><strong>Avantage :</strong> Coefficients interprétables</li>
-            </ul>
-            </div>
-            """, unsafe_allow_html=True)
+# Figure 2: Prédictions vs Réel sur le TEST SET (meilleur modèle)
+y_pred_best = resultats_ml[meilleur_nom]['y_pred_test']
 
-        with col_info2:
-            st.markdown("""
-            <div style='background-color: #f0f8f0; padding: 20px; border-radius: 10px; margin: 10px;'>
-            <h4 style='color: #28a745;'> Modèle Machine Learning</h4>
-            <ul style='color: #555;'>
-                <li><strong>Type :</strong> PoissonRegressor (Lasso)</li>
-                <li><strong>Régularisation :</strong> L1 (Lasso)</li>
-                <li><strong>Alpha :</strong> 0.01</li>
-                <li><strong>Performance :</strong> RMSE = 1.2756</li>
-                <li><strong>Objectif :</strong> Prédiction optimale</li>
-                <li><strong>Avantage :</strong> Meilleure précision</li>
-            </ul>
-            </div>
-            """, unsafe_allow_html=True)
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
-# ================================================================================
-# EXÉCUTION
-# ================================================================================
+# Scatter plot
+axes[0].scatter(y_test, y_pred_best, alpha=0.4, s=20, edgecolors='none', color='#3498db')
+axes[0].plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2, label='Parfaite')
+axes[0].set_xlabel('Valeur réelle (Y)', fontsize=12)
+axes[0].set_ylabel('Valeur prédite (Ŷ)', fontsize=12)
+axes[0].set_title(f'{meilleur_nom}: Prédictions vs Réel (TEST SET)\nR² = {resultats_ml[meilleur_nom]["r2"]:.4f}', 
+                  fontsize=12, fontweight='bold')
+axes[0].legend()
+axes[0].grid(True, alpha=0.3)
 
-if __name__ == "__main__":
-    main()
+# Distribution des résidus (sur test)
+residus = y_test - y_pred_best
+axes[1].hist(residus, bins=50, edgecolor='black', color='#e74c3c', alpha=0.7)
+axes[1].axvline(x=0, color='black', linestyle='--', lw=2)
+axes[1].set_xlabel('Résidus (Y - Ŷ)', fontsize=12)
+axes[1].set_ylabel('Fréquence', fontsize=12)
+axes[1].set_title(f'Distribution des résidus (TEST SET)\nMoy={residus.mean():.3f}, Std={residus.std():.3f}', 
+                  fontsize=12, fontweight='bold')
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('ml_predictions_residus.png', dpi=150, bbox_inches='tight')
+plt.show()
+print("Figure sauvegardée: ml_predictions_residus.png")
+
+
+#  COURBES D'APPRENTISSAGE
+
+print("\n" + "-"*60)
+print("13.9 COURBES D'APPRENTISSAGE (TRAIN vs VALIDATION CV)")
+print("-"*60)
+
+# Courbes d'apprentissage pour les 3 meilleurs modèles (basés sur RMSE Val)
+top3 = comparaison.head(3)['Modèle'].tolist()
+
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+for idx, nom in enumerate(top3):
+    print(f"\nCalcul courbe d'apprentissage: {nom}...")
+    
+    pipeline = resultats_ml[nom]['pipeline']
+    
+    # CORRECTION : X_train uniquement ! La CV interne gère la validation.
+    train_sizes, train_scores, val_scores = learning_curve(
+        pipeline, X_train, y_train, cv=5, n_jobs=-1,
+        train_sizes=np.linspace(0.1, 1.0, 10),
+        scoring='neg_root_mean_squared_error'
+    )
+    
+    train_mean = -np.mean(train_scores, axis=1)
+    train_std  = np.std(train_scores, axis=1)
+    val_mean   = -np.mean(val_scores, axis=1)
+    val_std    = np.std(val_scores, axis=1)
+    
+    ax = axes[idx]
+    ax.fill_between(train_sizes, train_mean - train_std, train_mean + train_std, alpha=0.1, color='blue')
+    ax.fill_between(train_sizes, val_mean - val_std, val_mean + val_std, alpha=0.1, color='green')
+    ax.plot(train_sizes, train_mean, 'o-', color='blue', label='Train RMSE')
+    ax.plot(train_sizes, val_mean, 'o-', color='green', label='Validation RMSE')
+    ax.set_xlabel('N observations (train)', fontsize=10)
+    ax.set_ylabel('RMSE', fontsize=10)
+    ax.set_title(f'{nom}\nRMSE Val={resultats_ml[nom]["rmse_val"]:.3f}', fontsize=10, fontweight='bold')
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('ml_learning_curves.png', dpi=150, bbox_inches='tight')
+plt.show()
+print("Figure sauvegardée: ml_learning_curves.png")
+
+#IMPORTANCE DES VARIABLES (SHAP)
+
+
+print("\n" + "-"*60)
+print("13.10 ANALYSE SHAP (SHapley Additive exPlanations)")
+print("-"*60)
+
+try:
+    import shap
+    print("Package SHAP installé.")
+    
+    # Préparation : fit du préprocesseur sur X_train uniquement
+    pipeline_meilleur = resultats_ml[meilleur_nom]['pipeline']
+    
+    # Clone et réentraînement sur X_train pour être sûr
+    pipeline_shap = clone(pipeline_meilleur)
+    pipeline_shap.fit(X_train, y_train)
+    
+    preprocessor_fitted = pipeline_shap.named_steps['preprocessor']
+    X_train_processed = preprocessor_fitted.transform(X_train)
+    X_test_processed  = preprocessor_fitted.transform(X_test)
+    
+    feature_names = (num_features + 
+                    list(preprocessor_fitted.named_transformers_['cat']
+                        .named_steps['onehot']
+                        .get_feature_names_out(cat_features)))
+    
+    print(f"Nombre de features après prétraitement: {len(feature_names)}")
+    print(f"Features: {feature_names[:10]}...")
+    
+    regressor = pipeline_shap.named_steps['regressor']
+    
+    if hasattr(regressor, 'feature_importances_'):
+        print(f"\nCalcul SHAP pour {meilleur_nom} (modèle basé sur arbres)...")
+        
+        explainer = shap.TreeExplainer(regressor)
+        shap_values = explainer.shap_values(X_test_processed)
+        
+        # Summary plot global
+        plt.figure(figsize=(12, 10))
+        shap.summary_plot(shap_values, X_test_processed, feature_names=feature_names, 
+                         show=False, max_display=20)
+        plt.title(f'SHAP Summary Plot - {meilleur_nom} (Test Set)', fontsize=12, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig('ml_shap_summary.png', dpi=150, bbox_inches='tight')
+        plt.show()
+        print("Figure sauvegardée: ml_shap_summary.png")
+        
+        # Bar plot des importances moyennes
+        plt.figure(figsize=(12, 8))
+        shap.summary_plot(shap_values, X_test_processed, feature_names=feature_names,
+                         plot_type="bar", show=False, max_display=15)
+        plt.title(f'Importance moyenne SHAP - {meilleur_nom} (Test Set)', fontsize=12, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig('ml_shap_importance.png', dpi=150, bbox_inches='tight')
+        plt.show()
+        print("Figure sauvegardée: ml_shap_importance.png")
+        
+        # Dependence plots pour les 3 features les plus importantes
+        shap_importance = np.abs(shap_values).mean(0)
+        top_features_idx = np.argsort(shap_importance)[-3:][::-1]
+        
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        for idx, feat_idx in enumerate(top_features_idx):
+            shap.dependence_plot(feat_idx, shap_values, X_test_processed, 
+                               feature_names=feature_names, ax=axes[idx], show=False)
+            axes[idx].set_title(f'Dependence Plot: {feature_names[feat_idx]}', fontsize=10)
+        plt.tight_layout()
+        plt.savefig('ml_shap_dependence.png', dpi=150, bbox_inches='tight')
+        plt.show()
+        print("Figure sauvegardée: ml_shap_dependence.png")
+        
+    else:
+        print(f"\nCalcul SHAP pour {meilleur_nom} (modèle linéaire)...")
+        
+        X_sample = shap.sample(X_test_processed, 100)
+        explainer = shap.KernelExplainer(regressor.predict, X_sample)
+        shap_values = explainer.shap_values(X_sample, nsamples=100)
+        
+        plt.figure(figsize=(12, 8))
+        shap.summary_plot(shap_values, X_sample, feature_names=feature_names,
+                         show=False, max_display=15)
+        plt.title(f'SHAP Summary Plot - {meilleur_nom} (Test Set)', fontsize=12, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig('ml_shap_summary.png', dpi=150, bbox_inches='tight')
+        plt.show()
+        print("Figure sauvegardée: ml_shap_summary.png")
+
+except ImportError:
+    print(" Package SHAP non installé. Installation: pip install shap")
+    print("Analyse SHAP ignorée.")
+    
+    print("\nImportance des features (méthode native):")
+    regressor = resultats_ml[meilleur_nom]['pipeline'].named_steps['regressor']
+    
+    if hasattr(regressor, 'feature_importances_'):
+        preprocessor_fitted = resultats_ml[meilleur_nom]['pipeline'].named_steps['preprocessor']
+        feature_names = (num_features + 
+                        list(preprocessor_fitted.named_transformers_['cat']
+                            .named_steps['onehot']
+                            .get_feature_names_out(cat_features)))
+        
+        importances = pd.DataFrame({
+            'Feature': feature_names,
+            'Importance': regressor.feature_importances_
+        }).sort_values('Importance', ascending=False)
+        
+        print(importances.head(15).to_string(index=False))
+        
+        plt.figure(figsize=(12, 8))
+        top15 = importances.head(15)
+        plt.barh(range(len(top15)), top15['Importance'], color='#2ecc71')
+        plt.yticks(range(len(top15)), top15['Feature'])
+        plt.xlabel('Importance')
+        plt.title(f'Importance des variables - {meilleur_nom}', fontsize=12, fontweight='bold')
+        plt.gca().invert_yaxis()
+        plt.tight_layout()
+        plt.savefig('ml_feature_importance.png', dpi=150, bbox_inches='tight')
+        plt.show()
+        print("Figure sauvegardée: ml_feature_importance.png")
+
+# 
+
+print("\n" + "-"*60)
+print("13.11 COMPARAISON ML vs MODÈLE POISSON")
+print("-"*60)
+
+# Indices pour le Poisson
+df_train_poisson = df_model.loc[X_train.index]
+df_test_poisson  = df_model.loc[X_test.index]
+df_trainval_poisson = df_model.loc[X_train.index.union(X_val.index)]
+
+# Modèle Poisson entraîné sur TRAIN uniquement (comparaison intermédiaire)
+formula_poisson_ml = ("Y ~ nb_vivants_centre + C(edu_cat) + C(richesse_cat) + C(region_cat) + "
+                      "C(besoin_pf_ns) + C(edu_mari_cat) + C(religion_cat) + "
+                      "C(proprietaire_terre_cat) + C(regarde_tv_cat) + C(regarde_journal_cat)")
+
+model_poisson_train = smf.glm(formula=formula_poisson_ml, data=df_train_poisson,
+                               family=sm.families.Poisson()).fit(cov_type='HC0')
+
+y_pred_poisson_test = model_poisson_train.predict(df_test_poisson)
+
+rmse_poisson = np.sqrt(mean_squared_error(y_test, y_pred_poisson_test))
+mae_poisson  = mean_absolute_error(y_test, y_pred_poisson_test)
+r2_poisson   = r2_score(y_test, y_pred_poisson_test)
+
+# Modèle ML réentraîné sur Train+Validation pour comparaison finale équitable
+print(f"\n{'='*70}")
+print("RÉENTRAÎNEMENT FINAL : Train + Validation")
+print(f"{'='*70}")
+
+X_trainval = pd.concat([X_train, X_val])
+y_trainval = pd.concat([y_train, y_val])
+
+pipeline_final_ml = clone(resultats_ml[meilleur_nom]['pipeline'])
+pipeline_final_ml.fit(X_trainval, y_trainval)
+
+y_pred_ml_final = pipeline_final_ml.predict(X_test)
+rmse_ml_final = np.sqrt(mean_squared_error(y_test, y_pred_ml_final))
+mae_ml_final  = mean_absolute_error(y_test, y_pred_ml_final)
+r2_ml_final   = r2_score(y_test, y_pred_ml_final)
+
+# Modèle Poisson réentraîné sur Train+Validation
+model_poisson_final = smf.glm(formula=formula_poisson_ml, data=df_trainval_poisson,
+                               family=sm.families.Poisson()).fit(cov_type='HC0')
+y_pred_poisson_final = model_poisson_final.predict(df_test_poisson)
+rmse_poisson_final = np.sqrt(mean_squared_error(y_test, y_pred_poisson_final))
+mae_poisson_final  = mean_absolute_error(y_test, y_pred_poisson_final)
+r2_poisson_final   = r2_score(y_test, y_pred_poisson_final)
+
+# Tableau comparatif final
+print(f"\n{'='*70}")
+print("TABLEAU COMPARATIF FINAL: POISSON vs MACHINE LEARNING")
+print("     (Les deux modèles réentraînés sur Train+Validation, évalués sur Test)")
+print(f"{'='*70}")
+
+comparaison_finale = pd.DataFrame({
+    'Modèle': [f'Poisson (robuste HC0)', f'{meilleur_nom} (ML)'],
+    'RMSE': [rmse_poisson_final, rmse_ml_final],
+    'MAE': [mae_poisson_final, mae_ml_final],
+    'R²': [r2_poisson_final, r2_ml_final],
+    'N paramètres': [len(model_poisson_final.params), 'Non applicable'],
+    'Interprétabilité': ['Élevée (coefficients, p-values)', 'Faible (boîte noire)'],
+    'Objectif': ['Inférence causale', 'Prédiction pure']
+})
+
+print(comparaison_finale.to_string(index=False))
+
+
+
+print("\n" + "-"*60)
+print("13.12 FONCTION DE PRÉDICTION ML (MODÈLE FINAL TRAIN+VAL)")
+print("-"*60)
+
+def predire_nb_enfants_ml(age=None, edu_cat='Aucune', richesse_cat='Plus pauvre', 
+                          region_cat='Adamaoua', nb_vivants_centre=0,
+                          besoin_pf_ns='Non_expose', edu_mari_cat='Aucune',
+                          religion_cat='Chrétienne', proprietaire_terre_cat='Non',
+                          regarde_tv_cat='Pas_du_tout', regarde_journal_cat='Pas_du_tout'):
+    """
+    Prédit le nombre idéal d'enfants avec le meilleur modèle ML.
+    Le modèle final est entraîné sur Train + Validation.
+    """
+    nouvel_individu = pd.DataFrame({
+        'edu_cat': [edu_cat],
+        'richesse_cat': [richesse_cat],
+        'region_cat': [region_cat],
+        'besoin_pf_ns': [besoin_pf_ns],
+        'edu_mari_cat': [edu_mari_cat],
+        'religion_cat': [religion_cat],
+        'proprietaire_terre_cat': [proprietaire_terre_cat],
+        'regarde_tv_cat': [regarde_tv_cat],
+        'regarde_journal_cat': [regarde_journal_cat],
+        'nb_vivants_centre': [nb_vivants_centre]
+    })
+    
+    prediction = pipeline_final_ml.predict(nouvel_individu)[0]
+    return round(prediction, 2)
+
+# Exemple
+print("\nExemple de prédiction (modèle final):")
+pred_exemple = predire_nb_enfants_ml(
+    edu_cat='Secondaire',
+    richesse_cat='Riche',
+    region_cat='Yaoundé',
+    nb_vivants_centre=2,
+    religion_cat='Musulmane'
+)
+print(f"Prédiction: {pred_exemple} enfants")
+
+print("\n" + "="*80)
+print("SECTION MACHINE LEARNING TERMINÉE")
+print("="*80)
